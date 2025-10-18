@@ -3,8 +3,13 @@ import math, json
 import numpy as np
 import pandas as pd
 import streamlit as st
+from datetime import datetime
+import math
+from datetime import datetime
 
 st.set_page_config(page_title="EV/Kelly Betting Calculator", page_icon="⚽", layout="centered")
+if "bet_log" not in st.session_state:
+    st.session_state["bet_log"] = []  # список записів журналу (dict)
 
 # ======= ПРЕСЕТИ (можна редагувати в UI) =======
 DEFAULT_HFA = {"EPL":0.13, "Serie A":0.15, "Ligue 1":0.14, "LaLiga":0.13, "Bundesliga":0.15}
@@ -398,13 +403,106 @@ if st.button("🔎 Розрахувати"):
             port["ev_uah"] = np.round(port["ev_per_uah"] * port["stake_uah"], 2)
             port["ROI_%"]  = np.round(100.0 * port["ev_uah"].sum() / max(port["stake_uah"].sum(),1), 2)
 
-            st.markdown("### 3) Купон (портфель)")
-            show_cols = ["league","match","market","odds","fair_pct","implied_pct","value_pct","stake_uah","ev_per_uah","ev_uah"]
-            st.dataframe(port[show_cols], hide_index=True, use_container_width=True)
+       # === 3) Купон (портфель) ===
+st.markdown("### 3) Купон (портфель)")
 
-            st.info(f"Σ ставка: {port['stake_uah'].sum():.2f} грн | Σ EV: +{port['ev_uah'].sum():.2f} грн | ROI ~ {port['ROI_%'].iloc[0]:.1f}%")
+show_cols = [
+    "league","match","market","odds",
+    "fair_pct","implied_pct","value_pct",
+    "stake_uah","ev_per_uah","ev_uah"
+]
 
-            csv = port[show_cols].to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ Завантажити CSV (купон)", data=csv, file_name="coupon_ev_kelly.csv", mime="text/csv")
+if len(port) == 0:
+    st.info("Поки що порожньо. Додайте матчі і натисніть «Розрахувати».")
+else:
+    # Таблиця купона
+    st.dataframe(port[show_cols], hide_index=True, use_container_width=True)
+
+    # Експорт купона в CSV
+    csv = port[show_cols].to_csv(index=False).encode("utf-8-sig")
+    st.download_button("📥 Завантажити CSV (купон)", data=csv, file_name="coupon.csv", mime="text/csv")
+
+    # Базовий підсумок
+    total_stake = float(port["stake_uah"].sum())
+    total_ev    = float(port["ev_uah"].sum())
+    roi         = (total_ev / total_stake * 100.0) if total_stake > 0 else 0.0
+    st.info(f"Σ ставка: {total_stake:.2f} грн | Σ EV: +{total_ev:.2f} грн | ROI ~ {roi:.1f}%")
+
+    # ---- ПІДСУМОК СЕСІЇ ----
+    n_bets    = int(len(port))
+    avg_value = float(port["value_pct"].mean()) if n_bets > 0 else 0.0
+    avg_odds  = float(port["odds"].mean()) if n_bets > 0 else 0.0
+
+    # 95% CI для ROI (припускаємо незалежність ординарів)
+    var_terms = []
+    if n_bets > 0:
+        for _, r in port.iterrows():
+            p   = float(r["fair_pct"]) / 100.0
+            b   = float(r["odds"]) - 1.0
+            ev1 = float(r["ev_per_uah"])                 # EV per 1 грн
+            var1 = p*(b**2) + (1.0-p)*(1.0) - (ev1**2)   # Var(X) для 1 грн
+            var_terms.append((float(r["stake_uah"])**2) * var1)
+
+        portfolio_var = sum(var_terms)
+        se_roi = (math.sqrt(portfolio_var) / total_stake * 100.0) if total_stake > 0 else 0.0
+        ci_low  = roi - 1.96*se_roi
+        ci_high = roi + 1.96*se_roi
+    else:
+        se_roi = 0.0
+        ci_low = ci_high = roi
+
+    st.markdown("#### Підсумок сесії")
+    st.write(
+        f"**Σ ставка:** {total_stake:.2f} грн  |  **Σ EV:** +{total_ev:.2f} грн  |  "
+        f"**ROI:** {roi:.2f}%  (95% CI: {ci_low:.2f}% … {ci_high:.2f}%)  |  "
+        f"**К-сть ставок:** {n_bets}  |  **Сер. Value:** {avg_value:.2f}%  |  **Сер. коеф.:** {avg_odds:.2f}"
+    )
+
+    # ---- ЖУРНАЛ СЕСІЇ ----
+    st.session_state.setdefault("bet_log", [])
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for _, r in port.iterrows():
+        st.session_state["bet_log"].append({
+            "timestamp": ts,
+            "league": r["league"],
+            "match": r["match"],
+            "market": r["market"],
+            "odds": float(r["odds"]),
+            "fair_pct": float(r["fair_pct"]),
+            "implied_pct": float(r["implied_pct"]),
+            "value_pct": float(r["value_pct"]),
+            "stake_uah": float(r["stake_uah"]),
+            "ev_per_uah": float(r["ev_per_uah"]),
+            "ev_uah": float(r["ev_uah"]),
+            "session_roi_pct": float(roi)
+        })
+
+    with st.expander("📒 Журнал сесії (усі обчислені купони)"):
+        log_df = pd.DataFrame(st.session_state.get("bet_log", []))
+        if len(log_df) == 0:
+            st.caption("Журнал порожній — розрахуй хоча б один купон.")
+        else:
+            st.dataframe(log_df, hide_index=True, use_container_width=True)
+            csv_log = log_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("⬇️ Завантажити CSV (журнал)", data=csv_log, file_name="session_log.csv", mime="text/csv")
+            if st.button("🧹 Очистити журнал"):
+                st.session_state["bet_log"] = []
+                st.experimental_rerun()
+
+
+# ---------- ВІДОБРАЖЕННЯ ЖУРНАЛУ + ЕКСПОРТ ----------
+with st.expander("📒 Журнал сесії (усі обчислені купони)"):
+    if st.session_state["bet_log"]:
+        log_df = pd.DataFrame(st.session_state["bet_log"])
+        st.dataframe(log_df, hide_index=True, use_container_width=True)
+        csv_log = log_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ Завантажити CSV (журнал)", data=csv_log, file_name="session_log.csv", mime="text/csv")
+        if st.button("🧹 Очистити журнал"):
+            st.session_state["bet_log"] = []
+            st.experimental_rerun()
+    else:
+        st.caption("Журнал порожній — розрахуй хоча б один купон.")
+        csv = port[show_cols].to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ Завантажити CSV (купон)", data=csv, file_name="coupon_ev_kelly.csv", mime="text/csv")
 
     st.caption(f"λ_home={lam_h:.2f}, λ_away={lam_a:.2f} • p(ML) MC: H={pH_mc:.2%}, D={pD_mc:.2%}, A={pA_mc:.2%}")
